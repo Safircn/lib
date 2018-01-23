@@ -12,6 +12,7 @@ import (
   "io/ioutil"
   "syscall"
   "bytes"
+  "errors"
 )
 
 type Program func()
@@ -45,7 +46,7 @@ func IsRun() bool {
     return false
   }
   //✗ ps -ax |awk '{print $1}' | grep -e "^94811$"
-  cmd := exec.Command("/bin/sh", "-c", `ps -ax | awk '{print $1}' | grep -e "^`+pid+`$"`)
+  cmd := exec.Command("/bin/sh", "-c", `ps -ax | awk '{print $1}' | grep -e "`+pid+`"`)
   var outBytes []byte
   outBytes, err = cmd.Output()
   if err == nil && bytes.Equal(bytes.TrimSpace(outBytes), []byte(pid)) {
@@ -70,23 +71,40 @@ func GetPid() (pid string, err error) {
 }
 
 //程序成活处理  pid 处理
-func programSelf() {
+func programSelf() error {
   _, err := os.Stat(PidPath + ProgramName)
   if err == nil || os.IsExist(err) {
     btPid, err := ioutil.ReadFile(PidPath + ProgramName)
     if err == nil {
-      cmd := exec.Command("/bin/sh", "-c", `"kill `+string(btPid)+`"`)
-      cmd.Start()
-      time.Sleep(time.Second * 3)
+      cmds := exec.Command("/bin/sh", "-c", fmt.Sprintf(`ps -ax | awk '{print $1}' | grep -e "%s"`, btPid))
+      outptBytes, err := cmds.Output()
+
+      if err != nil {
+        if serr, ok := err.(*exec.ExitError); ok {
+          if waitStatus, ok2 := serr.ProcessState.Sys().(syscall.WaitStatus); ok2 {
+            if waitStatus.ExitStatus() == 1 {
+              goto PROGRAM_SELF_NEXT
+            }
+          }
+        }
+        return errors.New("ps error command:" + fmt.Sprintf(`ps -ax | awk '{print $1}' | grep -e "%s"`, btPid) + " err:" + err.Error())
+      }
+    PROGRAM_SELF_NEXT:
+      if len(outptBytes) > 0 {
+        return errors.New("pid already exist pid:" + string(btPid))
+      } else {
+        err = os.Remove(PidPath + ProgramName)
+        if err != nil {
+          return errors.New("pidFile Remove err:" + err.Error())
+        }
+      }
     }
   }
 
   pid := os.Getpid()
   err = ioutil.WriteFile(PidPath+ProgramName, []byte(strconv.Itoa(pid)), 0660)
   if err != nil {
-    panic(err)
-    log.Error("%s", err)
-    os.Exit(0)
+    return err
   }
   //CTRL+C退出
   go func() {
@@ -95,6 +113,7 @@ func programSelf() {
     <-c
     programKill()
   }()
+  return nil
 }
 
 func programKill() {
@@ -131,9 +150,11 @@ func Run(Pgs ...Program) {
   runtime.GOMAXPROCS(runtime.NumCPU())
   serInit()
 
-  programSelf()
-
-  //pprofRun()
+  err := programSelf()
+  if err != nil {
+    log.Error("init err:%s", err.Error())
+    return
+  }
 
   //执行初始化
   if (len(Pgs) > 0 ) {
